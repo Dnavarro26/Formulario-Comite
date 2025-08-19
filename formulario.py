@@ -2,15 +2,18 @@
 # app.py — Formulario Comité de Riesgos (una sola hoja)
 # - Desplegables de evaluación en TEXTO (no números)
 # - Sin promedio de riesgo ni en PDF ni en la app
-# - Interlineado mejorado + MÁS ESPACIO ENTRE SECCIONES EN PDF
+# - Interlineado mejorado + más espacio entre secciones en PDF
 # - Resumen Ejecutivo con: Score, Calificación actual, Peor calificación
 # - Instrucciones Generales (texto actualizado)
+# - Parche para correr en Streamlit Cloud aunque falte reportlab (requirements.txt lo soluciona)
 
 import io
 from datetime import datetime
 import streamlit as st
 
-# ---- PDF (ReportLab) ----
+# ---- PDF (ReportLab) con fallback seguro ----
+A4_FALLBACK = (595.2756, 841.8898)  # tamaño A4 en puntos (ancho, alto) por si falla el import
+
 try:
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import A4
@@ -18,14 +21,25 @@ try:
     from reportlab.lib import colors
     from reportlab.platypus import Table, TableStyle
     from reportlab.lib.utils import ImageReader
+    PAGE_W, PAGE_H = A4
 except Exception:
+    # Si reportlab no está instalado, permitimos que la app cargue.
     canvas = None
+    colors = None
+    Table = None
+    TableStyle = None
+    ImageReader = None
+    PAGE_W, PAGE_H = A4_FALLBACK
+    # build_pdf() comprobará canvas is None y mostrará un error claro.
 
-PAGE_W, PAGE_H = A4
-LM, RM, TM, BM = 2*cm, 2*cm, 2*cm, 2*cm
+# Márgenes (usar 2cm; si cm no existe, aproximamos 2cm en puntos ≈ 56.69)
+LM = 2 * (cm if 'cm' in globals() and cm else 28.3465)  # 56.693 pts
+RM = LM
+TM = LM
+BM = LM
 CONTENT_W = PAGE_W - LM - RM
 
-# Ajustes de espaciado
+# Ajustes de espaciado para el PDF
 LINE_HEIGHT = 14          # interlineado
 BLOCK_SPACE = 22          # espacio general después de bloques
 TABLE_SPACE = 24          # espacio después de tablas
@@ -64,7 +78,7 @@ OPCIONES_EVAL = [
     "Bien mitigado",
 ]
 
-# -------- Funciones utilitarias PDF --------
+# -------- Utilidades de maquetación PDF --------
 def wrap_lines(text, font_name, font_size, max_w, canv):
     if not text:
         return ["-"]
@@ -75,9 +89,11 @@ def wrap_lines(text, font_name, font_size, max_w, canv):
         if canv.stringWidth(test, font_name, font_size) <= max_w:
             line = test
         else:
-            if line: lines.append(line)
+            if line:
+                lines.append(line)
             line = w
-    if line: lines.append(line)
+    if line:
+        lines.append(line)
     out = []
     for l in "\n".join(lines).split("\n"):
         if l == "":
@@ -89,9 +105,11 @@ def wrap_lines(text, font_name, font_size, max_w, canv):
             if canv.stringWidth(test, font_name, font_size) <= max_w:
                 sub = test
             else:
-                if sub: out.append(sub)
+                if sub:
+                    out.append(sub)
                 sub = w
-        if sub: out.append(sub)
+        if sub:
+            out.append(sub)
     return out or ["-"]
 
 def draw_heading(canv, text, y, size=14):
@@ -114,7 +132,8 @@ def draw_paragraph(canv, y, title, body, size=10, line_height=LINE_HEIGHT, space
     return y - space_after
 
 def draw_table(canv, y, data):
-    table = Table(data, colWidths=[8*cm, 8*cm])
+    # Solo se usa cuando reportlab está disponible
+    table = Table(data, colWidths=[CONTENT_W/2, CONTENT_W/2])
     table.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#F2F2F2")),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
@@ -133,7 +152,7 @@ def draw_table(canv, y, data):
         canv.showPage()
         y = PAGE_H - TM
     table.drawOn(canv, LM, y - h)
-    return y - h - TABLE_SPACE  # MÁS espacio tras tabla
+    return y - h - TABLE_SPACE  # más espacio tras la tabla
 
 def draw_eval(canv, y, label, score_text, size=10, line_height=LINE_HEIGHT, space_after=BLOCK_SPACE):
     canv.setFont("Helvetica-Bold", size)
@@ -144,21 +163,17 @@ def draw_eval(canv, y, label, score_text, size=10, line_height=LINE_HEIGHT, spac
     return y - space_after
 
 def section_block(canv, num, title, pregunta, narrativa, eval_text):
-    # Manejo de salto de página conservador por mayor espaciado
     y = canv._curr_y
     if y < BM + 260:
         canv.showPage(); y = PAGE_H - TM
-    # Título
     y = draw_heading(canv, f"{num}. {title}", y, size=12) - 12
-    # Pregunta orientadora con interlineado y respiro
     canv.setFont("Helvetica-Oblique", 9)
     for line in wrap_lines("Pregunta orientadora: " + (pregunta or "-"), "Helvetica-Oblique", 9, CONTENT_W, canv):
         canv.drawString(LM, y, line)
         y -= LINE_HEIGHT
         if y < BM:
             canv.showPage(); y = PAGE_H - TM; canv.setFont("Helvetica-Oblique", 9)
-    y -= 8  # respiro tras pregunta
-    # Narrativa y Resultado con más espacio
+    y -= 8  # respiro tras la pregunta
     y = draw_paragraph(canv, y, "Narrativa o justificación:", narrativa or "-", line_height=LINE_HEIGHT, space_after=BLOCK_SPACE)
     y = draw_eval(canv, y, "Resultado:", eval_text, line_height=LINE_HEIGHT, space_after=BLOCK_SPACE + SECTION_EXTRA_GAP)
     canv._curr_y = y
@@ -167,11 +182,11 @@ def build_pdf(data, logo_bytes=None):
     if canvas is None:
         raise RuntimeError("ReportLab no está instalado. Instala: pip install reportlab")
     buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
+    c = canvas.Canvas(buf, pagesize=(PAGE_W, PAGE_H))
     c._curr_y = PAGE_H - TM
 
     # Encabezado
-    if logo_bytes:
+    if logo_bytes and ImageReader:
         try:
             img = ImageReader(io.BytesIO(logo_bytes))
             c.drawImage(img, LM, c._curr_y-20, width=90, height=30, preserveAspectRatio=True, mask='auto')
@@ -184,7 +199,7 @@ def build_pdf(data, logo_bytes=None):
     c.drawRightString(PAGE_W - RM, c._curr_y, f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     c._curr_y -= 20
 
-    # Resumen Ejecutivo
+    # 1. Resumen Ejecutivo
     c._curr_y = draw_heading(c, "1. Resumen Ejecutivo de la Operación", c._curr_y, size=13) - 14
     resumen_tbl = [
         ["Nombre del cliente:", data.get("nombre_cliente","")],
@@ -201,11 +216,11 @@ def build_pdf(data, logo_bytes=None):
     ]
     c._curr_y = draw_table(c, c._curr_y, [["Campo","Valor"], *resumen_tbl])
 
-    # Instrucciones Generales
+    # 2. Instrucciones
     c._curr_y = draw_paragraph(c, c._curr_y, "2. Instrucciones Generales", INSTRUCCIONES,
                                line_height=LINE_HEIGHT, space_after=BLOCK_SPACE + 6)
 
-    # Secciones 3–9 (cada una con espacio extra al final)
+    # 3–9
     section_block(c, 3, "Riesgos materiales identificados", P_Q3, data.get("s3_narrativa"), data.get("s3_eval"))
     section_block(c, 4, "Coherencia global de la operación", P_Q4, data.get("s4_narrativa"), data.get("s4_eval"))
     section_block(c, 5, "Justificación de excepciones al modelo", P_Q5, data.get("s5_narrativa"), data.get("s5_eval"))
@@ -228,7 +243,7 @@ def build_pdf(data, logo_bytes=None):
     buf.seek(0)
     return buf.getvalue()
 
-# ------------- UI -------------
+# ------------- UI Streamlit -------------
 st.set_page_config(page_title="Comité de Riesgos", page_icon="🛡️", layout="centered")
 st.title("Formulario de Evaluación para Comité de Riesgos")
 st.caption("Complete todas las secciones y descargue el PDF.")
@@ -238,7 +253,7 @@ with st.sidebar:
     nombre_pdf_base = st.text_input("Nombre base", value="Comite_Riesgos")
 
 with st.form("form_riesgos"):
-    # Resumen Ejecutivo
+    # 1) Resumen Ejecutivo
     st.subheader("1) Resumen Ejecutivo de la Operación")
     c1, c2 = st.columns(2)
     with c1:
@@ -267,12 +282,12 @@ with st.form("form_riesgos"):
         responsable = st.text_input("Responsable del análisis *")
     risk_file = st.text_input("Expediente de riesgo (ID/enlace interno)")
 
-    # Instrucciones Generales
+    # 2) Instrucciones
     st.markdown("### 2) Instrucciones Generales")
     st.write(INSTRUCCIONES)
     st.markdown("---")
 
-    # Secciones 3–9 con evaluaciones en texto
+    # 3–9 con evaluaciones en texto
     st.subheader("3) Riesgos materiales identificados")
     st.caption(P_Q3)
     s3_narrativa = st.text_area("Narrativa (S3) *")
@@ -308,7 +323,7 @@ with st.form("form_riesgos"):
     s9_narrativa = st.text_area("Narrativa (S9) *")
     s9_eval = st.selectbox("Evaluación (S9) *", OPCIONES_EVAL)
 
-    # Recomendación
+    # 10) Recomendación
     st.subheader("10) Recomendación del Analista")
     recomendacion_analista = st.text_area("Recomendaciones y comentarios *")
 
@@ -366,7 +381,12 @@ if submitted:
             "recomendacion_analista": recomendacion_analista,
         }
 
-        logo_bytes = logo_file.read() if logo_file else None
-        pdf_bytes = build_pdf(data, logo_bytes=logo_bytes)
-        nombre_archivo = f"{nombre_pdf_base}_{nombre_cliente}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
-        st.download_button("Descargar PDF", data=pdf_bytes, file_name=nombre_archivo, mime="application/pdf")
+        try:
+            logo_bytes = logo_file.read() if logo_file else None
+            pdf_bytes = build_pdf(data, logo_bytes=logo_bytes)
+            nombre_archivo = f"{nombre_pdf_base}_{nombre_cliente}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+            st.download_button("Descargar PDF", data=pdf_bytes, file_name=nombre_archivo, mime="application/pdf")
+        except RuntimeError as e:
+            st.error(str(e))
+        except Exception as e:
+            st.error(f"Ocurrió un error al generar el PDF: {e}")
